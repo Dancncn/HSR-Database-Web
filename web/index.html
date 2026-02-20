@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>星铁资源查询</title>
+  <link rel="stylesheet" href="/web/styles.css">
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <div class="hero-top">
+        <h1 data-i18n="hero.title">星铁资源查询台</h1>
+        <div class="ui-lang-box">
+          <label for="ui-lang" data-i18n="ui.lang.label">界面语言</label>
+          <select id="ui-lang">
+            <option value="CHS" data-i18n="lang.chs">中文</option>
+            <option value="EN" data-i18n="lang.en">English</option>
+            <option value="JP" data-i18n="lang.jp">日本語</option>
+            <option value="KR" data-i18n="lang.kr">한국어</option>
+          </select>
+        </div>
+      </div>
+      <p data-i18n="hero.subtitle">分页结构：角色信息 / 对话文本搜索 / 主线任务搜索 / 物品搜索 / 怪物信息</p>
+      <div id="stats" class="stats" data-i18n="stats.loading">加载中...</div>
+    </header>
+
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-page="avatar" data-i18n="tab.avatar">角色信息</button>
+      <button class="tab" data-page="dialogue" data-i18n="tab.dialogue">对话文本搜索</button>
+      <button class="tab" data-page="mission" data-i18n="tab.mission">主线任务搜索</button>
+      <button class="tab" data-page="item" data-i18n="tab.item">物品搜索</button>
+      <button class="tab" data-page="monster" data-i18n="tab.monster">怪物信息</button>
+    </nav>
+
+    <main class="pages">
+      <section class="page-panel active" id="page-avatar">
+        <div class="workspace">
+          <div class="pane left-pane">
+            <div class="search-shell">
+              <h3 data-i18n="avatar.search.title">角色检索</h3>
+              <div class="controls">
+                <input id="avatar-q" type="text" data-i18n-placeholder="avatar.search.placeholder" placeholder="输入角色名关键词">
+                <select id="avatar-lang">
+                  <option value="CHS" data-i18n="lang.chs">中文</option>
+                  <option value="EN" data-i18n="lang.en">English</option>
+                  <option value="JP" data-i18n="lang.jp">日本語</option>
+                  <option value="KR" data-i18n="lang.kr">한국어</option>
+                </select>
+                <button id="avatar-search" data-i18n="action.search">查询</button>
+              </div>
+            </div>
+            <div class="result-shell">
+              <div class="shell-title" data-i18n="avatar.result.title">角色搜索结果</div>
+              <div id="avatar-list" class="list"></div>
+              <div id="avatar-pager" class="pager"></div>
+            </div>
+          </div>
+          <div class="pane right-pane">
+            <div class="detail-box sticky">
+              <h3 data-i18n="avatar.detail.title">角色详情</h3>
+              <div id="avatar-detail" class="list detail-list"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="page-panel" id="page-dialogue">
+        <div class="workspace">
+          <div class="pane left-pane">
+            <div class="search-shell">
+              <h3 data-i18n="dialogue.search.title">对话检索</h3>
+              <div class="controls">
+                <input id="dialogue-q" type="text" data-i18n-placeholder="dialogue.search.placeholder" placeholder="输入台词或说话人关键词">
+                <select id="dialogue-lang">
+                  <option value="CHS" data-i18n="lang.chs">中文</option>
+                  <option value="EN" data-i18n="lang.en">English</option>
+                  <option value="JP" data-i18n="lang.jp">日本語</option>
+                  <option value="KR" data-i18n="lang.kr">한국어</option>
+                </select>
+                <select id="dialogue-order">
+                  <option value="asc" data-i18n="dialogue.order.asc">按ID正序</option>
+                  <option value="desc" data-i18n="dialogue.order.desc">按ID倒序</option>
+                </select>
+                <button id="dialogue-search" data-i18n="action.search">查询</button>
+              </div>
+            </div>
+            <div class="result-shell">
+              <div class="shell-title" data-i18n="dialogue.result.title">对话搜索结果</div>
+              <div id="dialogue-list" class="list"></div>
+              <div id="dialogue-pager" class="pager"></div>
+            </div>
+          </div>
+          <div class="pane right-pane">
+            <div class="detail-box sticky">
+              <h3 data-i18n="dialogue.refs.title">对话引用明细</h3>
+              <div id="dialogue-refs" class="list detail-list"></div>
+              <div id="dialogue-refs-pager" class="pager"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="page-panel" id="page-mission">
+        <div class="workspace">
+          <div class="pane left-pane">
+            <div class="search-shell">
+              <h3 data-i18n="mission.search.title">主线任务检索</h3>
+              <div class="controls">
+                <input id="mission-q" type="text" data-i18n-placeholder="mission.search.placeholder" placeholder="输入主线任务关键词">
+                <select id="mission-lang">
+                  <option value="CHS" data-i18n="lang.chs">中文</option>
+                  <option value="EN" data-i18n="lang.en">English</option>
+                  <option value="JP" data-i18n="lang.jp">日本語</option>
+                  <option value="KR" data-i18n="lang.kr">한국어</option>
+                </select>
+                <button id="mission-search" data-i18n="action.search">查询</button>
+              </div>
+            </div>
+            <div class="result-shell">
+              <div class="shell-title" data-i18n="mission.result.title">主线任务结果</div>
+              <div id="mission-list" class="list"></div>
+              <div id="mission-pager" class="pager"></div>
+            </div>
+          </div>
+          <div class="pane right-pane">
+            <div class="detail-box sticky">
+              <h3 data-i18n="mission.detail.title">任务细化信息</h3>
+              <div id="mission-detail" class="list detail-list"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="page-panel" id="page-item">
+        <div class="workspace">
+          <div class="pane left-pane">
+            <div class="search-shell">
+              <h3 data-i18n="item.search.title">物品检索</h3>
+              <div class="controls item-controls">
+                <div class="item-row item-row-main">
+                  <input id="item-q" type="text" data-i18n-placeholder="item.search.placeholder" placeholder="输入物品或光锥关键词">
+                  <button id="item-search" data-i18n="action.search">查询</button>
+                </div>
+                <div class="item-row item-row-filters">
+                  <select id="item-lang">
+                    <option value="CHS" data-i18n="lang.chs">中文</option>
+                    <option value="EN" data-i18n="lang.en">English</option>
+                    <option value="JP" data-i18n="lang.jp">日本語</option>
+                    <option value="KR" data-i18n="lang.kr">한국어</option>
+                  </select>
+                  <select id="item-rarity"><option value="" data-i18n="item.filter.rarity.all">全部稀有度</option></select>
+                  <select id="item-main-type"><option value="" data-i18n="item.filter.main.all">全部主类型</option></select>
+                  <select id="item-sub-type"><option value="" data-i18n="item.filter.sub.all">全部子类型</option></select>
+                </div>
+              </div>
+            </div>
+            <div class="result-shell">
+              <div class="shell-title" data-i18n="item.result.title">物品搜索结果</div>
+              <div id="item-list" class="list"></div>
+              <div id="item-pager" class="pager"></div>
+            </div>
+          </div>
+          <div class="pane right-pane">
+            <div class="detail-box sticky">
+              <h3 data-i18n="item.detail.title">物品详情</h3>
+              <div id="item-detail" class="list detail-list"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="page-panel" id="page-monster">
+        <div class="workspace">
+          <div class="pane left-pane">
+            <div class="search-shell">
+              <h3 data-i18n="monster.search.title">怪物检索</h3>
+              <div class="controls monster-controls">
+                <div class="item-row item-row-main">
+                  <input id="monster-q" type="text" data-i18n-placeholder="monster.search.placeholder" placeholder="输入怪物名、介绍或ID">
+                  <button id="monster-search" data-i18n="action.search">查询</button>
+                </div>
+                <div class="item-row item-row-filters">
+                  <select id="monster-lang">
+                    <option value="CHS" data-i18n="lang.chs">中文</option>
+                    <option value="EN" data-i18n="lang.en">English</option>
+                    <option value="JP" data-i18n="lang.jp">日本語</option>
+                    <option value="KR" data-i18n="lang.kr">한국어</option>
+                  </select>
+                  <select id="monster-rank"><option value="" data-i18n="monster.filter.rank.all">全部阶级</option></select>
+                  <select id="monster-weakness"><option value="" data-i18n="monster.filter.weakness.all">全部弱点</option></select>
+                </div>
+              </div>
+            </div>
+            <div class="result-shell">
+              <div class="shell-title" data-i18n="monster.result.title">怪物搜索结果</div>
+              <div id="monster-list" class="list"></div>
+              <div id="monster-pager" class="pager"></div>
+            </div>
+          </div>
+          <div class="pane right-pane">
+            <div class="detail-box sticky">
+              <h3 data-i18n="monster.detail.title">怪物详情</h3>
+              <div id="monster-detail" class="list detail-list"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <span>Acknowledgments：</span>
+      <a href="https://github.com/DimbreathBot/TurnBasedGameData" target="_blank" rel="noopener noreferrer">TurnBasedGameData</a>
+      <span> | </span>
+      <a href="https://gitlab.com/Dimbreath/turnbasedgamedata" target="_blank" rel="noopener noreferrer">Mirror</a>
+      <span> | </span>
+      <a href="https://discord.gg/CastoricePS" target="_blank" rel="noopener noreferrer">Discord</a>
+    </footer>
+  </div>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>
