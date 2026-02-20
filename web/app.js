@@ -500,8 +500,20 @@ function formatGameText(raw) {
   return safe;
 }
 
+const CONFIGURED_API_BASE = (() => {
+  const raw = (window.PUBLIC_API_BASE || "").trim();
+  if (!raw) return "/api";
+  return raw.endsWith("/") ? raw.slice(0, -1) : raw;
+})();
+
+function buildApiPath(path) {
+  const p = path.startsWith("/api/") ? path.slice(4) : path;
+  const suffix = p.startsWith("/") ? p : `/${p}`;
+  return `${CONFIGURED_API_BASE}${suffix}`;
+}
+
 async function api(path, params = {}) {
-  const u = new URL(path, window.location.origin);
+  const u = new URL(buildApiPath(path), window.location.origin);
   Object.entries(params).forEach(([k, v]) => {
     if (v !== undefined && v !== null && v !== "") u.searchParams.set(k, v);
   });

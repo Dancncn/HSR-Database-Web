@@ -150,3 +150,43 @@ python hsrdb/serve.py `
 - `GET /api/term/explain?term=...&lang=CHS&limit=5`
 - `GET /api/search/text?q=...&lang=CHS&page=1&page_size=20`
 
+## 6) Cloudflare Workers (Python) + D1
+
+Worker files:
+
+- `cf_worker/src/entry.py`
+- `cf_worker/wrangler.toml`
+
+Create D1 and fill `database_id` in `cf_worker/wrangler.toml`:
+
+```powershell
+wrangler d1 create hsrdb
+```
+
+Export SQLite and import to D1:
+
+```powershell
+python scripts/export_sqlite_dump.py --source hsrdb/database/hsr_resources_lite.db --out cf_worker/dump.sql
+wrangler d1 execute hsrdb --file=cf_worker/dump.sql
+```
+
+Local development:
+
+```powershell
+cd cf_worker
+wrangler dev
+```
+
+Deploy:
+
+```powershell
+cd cf_worker
+wrangler deploy
+```
+
+Frontend API base (optional override):
+
+```html
+<script>window.PUBLIC_API_BASE = "http://127.0.0.1:8787/api";</script>
+```
+

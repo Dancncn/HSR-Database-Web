@@ -1,0 +1,16 @@
+{
+  "name": "hsrdb-api",
+  "main": "src/entry.py",
+  "compatibility_date": "2026-02-20",
+  "compatibility_flags": ["python_workers"],
+  "vars": {
+    "WORKER_NAME": "hsrdb-api"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "hsrdb",
+      "database_id": "c848b7fc-405a-480b-8b85-aa091da341f0"
+    }
+  ]
+}

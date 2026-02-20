@@ -1,0 +1,11 @@
+﻿# SQLite / D1 dump files
+dump_*.sql
+_dump_*.sql
+*.db
+*.sqlite
+*.sqlite3
+
+# Python cache
+__pycache__/
+*.pyc
+
