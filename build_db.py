@@ -7,10 +7,15 @@ import re
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 
 TALK_SENTENCE_RE = re.compile(r"TalkSentence_(\d+)")
+
+try:
+    from serve import hash_text_key, load_avatar_story_index, load_light_cone_index, load_monster_index  # type: ignore
+except Exception:
+    from hsrdb.serve import hash_text_key, load_avatar_story_index, load_light_cone_index, load_monster_index  # type: ignore
 
 
 def log(msg: str) -> None:
@@ -292,14 +297,29 @@ def create_schema(conn: sqlite3.Connection) -> None:
         log("FTS5 not available; continuing without FTS tables.")
 
 
-def parse_langs(raw: str) -> List[str]:
+def parse_langs(raw: Optional[str], fallback: Optional[List[str]] = None) -> List[str]:
+    if raw is None:
+        return list(fallback or ["CHS", "EN"])
     langs = [x.strip().upper() for x in raw.split(",") if x.strip()]
-    return langs if langs else ["CHS", "EN"]
+    return langs if langs else list(fallback or ["CHS", "EN"])
+
+
+def resolve_textmap_root(resources_root: Path) -> Path:
+    candidates = [
+        resources_root / "Textmap",
+        resources_root / "TextMap",
+        resources_root / "hsrdb" / "Textmap",
+        resources_root / "hsrdb" / "TextMap",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
 
 
 def load_text_maps(resources_root: Path, langs: List[str]) -> Dict[str, Dict[str, str]]:
     result: Dict[str, Dict[str, str]] = {}
-    text_root = resources_root / "TextMap"
+    text_root = resolve_textmap_root(resources_root)
     for lang in langs:
         merged: Dict[str, str] = {}
         for name in (f"TextMapMain{lang}.json", f"TextMap{lang}.json"):
@@ -1049,30 +1069,302 @@ def write_meta(conn: sqlite3.Connection, payload: Dict[str, Any]) -> None:
     )
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Build a local sqlite DB for querying resources.")
-    parser.add_argument("--resources-root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--db-path", type=Path, default=Path(__file__).resolve().parent / "hsr_resources.db")
-    parser.add_argument("--langs", type=str, default="CHS,EN")
-    parser.add_argument("--skip-level-config", action="store_true", help="Only scan Story/ for references.")
-    parser.add_argument("--force", action="store_true", help="Overwrite existing db if present.")
-    args = parser.parse_args()
+def file_size_mb(path: Path) -> float:
+    return path.stat().st_size / (1024 * 1024)
 
-    resources_root = args.resources_root.resolve()
-    db_path = args.db_path.resolve()
-    include_level_config = not args.skip_level_config
-    langs = parse_langs(args.langs)
 
-    if not resources_root.exists():
-        raise FileNotFoundError(resources_root)
+def copy_static_tables_from_source(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        INSERT INTO meta(key, value)
+        SELECT key, value FROM src.meta;
 
-    if db_path.exists():
-        if not args.force:
-            raise FileExistsError(f"{db_path} already exists. Use --force to overwrite.")
-        db_path.unlink()
+        INSERT INTO main_mission
+        SELECT * FROM src.main_mission;
+        INSERT INTO sub_mission
+        SELECT * FROM src.sub_mission;
+        INSERT INTO mission_pack_link
+        SELECT * FROM src.mission_pack_link;
 
+        INSERT INTO avatar
+        SELECT * FROM src.avatar;
+        INSERT INTO avatar_promotion
+        SELECT * FROM src.avatar_promotion;
+        INSERT INTO avatar_skill
+        SELECT * FROM src.avatar_skill;
+        INSERT INTO avatar_rank
+        SELECT * FROM src.avatar_rank;
+
+        INSERT INTO item
+        SELECT * FROM src.item;
+        """
+    )
+
+
+def copy_story_and_talk_from_source(conn: sqlite3.Connection, keep_all_story_refs: bool, keep_all_talk: bool) -> None:
+    if keep_all_story_refs:
+        ref_where = "1=1"
+    else:
+        ref_where = "source_path LIKE 'Story/Mission/%' OR source_path LIKE 'Config/Level/Mission/%'"
+
+    conn.execute(
+        f"""
+        INSERT INTO story_reference(
+            source_path, source_group, json_path, task_type, talk_sentence_id, timeline_name,
+            performance_type, performance_id, trigger_custom_string, custom_string
+        )
+        SELECT source_path, source_group, json_path, task_type, talk_sentence_id, timeline_name,
+               performance_type, performance_id, trigger_custom_string, custom_string
+        FROM src.story_reference
+        WHERE {ref_where}
+        """
+    )
+
+    if keep_all_talk:
+        conn.executescript(
+            """
+            INSERT INTO talk_sentence
+            SELECT * FROM src.talk_sentence;
+
+            INSERT INTO talk_sentence_multi_voice
+            SELECT * FROM src.talk_sentence_multi_voice;
+            """
+        )
+        return
+
+    conn.execute(
+        """
+        INSERT INTO talk_sentence
+        SELECT *
+        FROM src.talk_sentence
+        WHERE talk_sentence_id IN (
+            SELECT DISTINCT talk_sentence_id
+            FROM story_reference
+            WHERE talk_sentence_id IS NOT NULL
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        INSERT INTO talk_sentence_multi_voice
+        SELECT mv.*
+        FROM src.talk_sentence_multi_voice mv
+        JOIN talk_sentence t ON t.talk_sentence_id = mv.talk_sentence_id
+        """
+    )
+
+
+def add_hash_sql_sources(conn: sqlite3.Connection) -> None:
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS needed_hash(hash TEXT PRIMARY KEY)")
+    conn.executescript(
+        """
+        INSERT OR IGNORE INTO needed_hash(hash)
+        SELECT speaker_hash FROM talk_sentence WHERE speaker_hash IS NOT NULL AND speaker_hash != '';
+        INSERT OR IGNORE INTO needed_hash(hash)
+        SELECT text_hash FROM talk_sentence WHERE text_hash IS NOT NULL AND text_hash != '';
+
+        INSERT OR IGNORE INTO needed_hash(hash)
+        SELECT name_hash FROM main_mission WHERE name_hash IS NOT NULL AND name_hash != '';
+        INSERT OR IGNORE INTO needed_hash(hash)
+        SELECT target_hash FROM sub_mission WHERE target_hash IS NOT NULL AND target_hash != '';
+        INSERT OR IGNORE INTO needed_hash(hash)
+        SELECT description_hash FROM sub_mission WHERE description_hash IS NOT NULL AND description_hash != '';
+
+        INSERT OR IGNORE INTO needed_hash(hash)
+        SELECT name_hash FROM avatar WHERE name_hash IS NOT NULL AND name_hash != '';
+        INSERT OR IGNORE INTO needed_hash(hash)
+        SELECT full_name_hash FROM avatar WHERE full_name_hash IS NOT NULL AND full_name_hash != '';
+
+        INSERT OR IGNORE INTO needed_hash(hash)
+        SELECT name_hash FROM avatar_skill WHERE name_hash IS NOT NULL AND name_hash != '';
+        INSERT OR IGNORE INTO needed_hash(hash)
+        SELECT desc_hash FROM avatar_skill WHERE desc_hash IS NOT NULL AND desc_hash != '';
+        INSERT OR IGNORE INTO needed_hash(hash)
+        SELECT tag_hash FROM avatar_skill WHERE tag_hash IS NOT NULL AND tag_hash != '';
+
+        INSERT OR IGNORE INTO needed_hash(hash)
+        SELECT item_name_hash FROM item WHERE item_name_hash IS NOT NULL AND item_name_hash != '';
+        INSERT OR IGNORE INTO needed_hash(hash)
+        SELECT item_desc_hash FROM item WHERE item_desc_hash IS NOT NULL AND item_desc_hash != '';
+        INSERT OR IGNORE INTO needed_hash(hash)
+        SELECT item_bg_desc_hash FROM item WHERE item_bg_desc_hash IS NOT NULL AND item_bg_desc_hash != '';
+        """
+    )
+
+
+def add_hash_if_any(out: Set[str], raw: Optional[str]) -> None:
+    if not raw:
+        return
+    h = hash_text_key(str(raw))
+    if h:
+        out.add(str(h))
+
+
+def gather_runtime_hashes(conn: sqlite3.Connection, resources_root: Path, include_monster: bool) -> Set[str]:
+    out: Set[str] = set()
+
+    rank_rows = conn.execute("SELECT name_raw, desc_raw, rank_ability_json FROM avatar_rank").fetchall()
+    for row in rank_rows:
+        add_hash_if_any(out, row[0] if isinstance(row[0], str) else None)
+        add_hash_if_any(out, row[1] if isinstance(row[1], str) else None)
+        raw_json = row[2] if isinstance(row[2], str) else "[]"
+        try:
+            arr = json.loads(raw_json)
+        except Exception:
+            arr = []
+        if isinstance(arr, list):
+            for item in arr:
+                if isinstance(item, str):
+                    add_hash_if_any(out, item)
+
+    try:
+        stories_by_avatar, story_name_hash_by_id = load_avatar_story_index(str(resources_root.resolve()))
+        for stories in stories_by_avatar.values():
+            for entry in stories:
+                val = entry.get("story_hash")
+                if isinstance(val, str):
+                    add_hash_if_any(out, val)
+        for val in story_name_hash_by_id.values():
+            if isinstance(val, str):
+                add_hash_if_any(out, val)
+    except Exception:
+        pass
+
+    try:
+        lc_index = load_light_cone_index(str(resources_root.resolve()))
+        for entry in lc_index.values():
+            levels = entry.get("levels") or []
+            for lv in levels:
+                if not isinstance(lv, dict):
+                    continue
+                for key in ("skill_name_hash", "skill_desc_hash"):
+                    val = lv.get(key)
+                    if isinstance(val, str):
+                        add_hash_if_any(out, val)
+    except Exception:
+        pass
+
+    if include_monster:
+        try:
+            m_index = load_monster_index(str(resources_root.resolve()))
+            for item in m_index.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                for key in ("name_hash", "introduction_hash"):
+                    val = item.get(key)
+                    if isinstance(val, str):
+                        add_hash_if_any(out, val)
+                for key in item.get("ability_name_keys") or []:
+                    if isinstance(key, str):
+                        add_hash_if_any(out, key)
+            for skill in (m_index.get("skills") or {}).values():
+                if not isinstance(skill, dict):
+                    continue
+                for key in ("name_hash", "desc_hash", "type_desc_hash", "tag_hash"):
+                    val = skill.get(key)
+                    if isinstance(val, str):
+                        add_hash_if_any(out, val)
+        except Exception:
+            pass
+
+    return out
+
+
+def insert_runtime_hashes(conn: sqlite3.Connection, hashes: Iterable[str]) -> int:
+    rows = [(h,) for h in sorted(set(hashes)) if h]
+    if not rows:
+        return 0
+    conn.executemany("INSERT OR IGNORE INTO needed_hash(hash) VALUES(?)", rows)
+    return len(rows)
+
+
+def copy_text_map_by_needed_hash(conn: sqlite3.Connection, langs: Sequence[str]) -> int:
+    placeholders = ",".join("?" for _ in langs)
+    conn.execute(
+        f"""
+        INSERT INTO text_map(lang, hash, text)
+        SELECT tm.lang, tm.hash, tm.text
+        FROM src.text_map tm
+        JOIN needed_hash nh ON nh.hash = tm.hash
+        WHERE tm.lang IN ({placeholders})
+        """,
+        tuple(langs),
+    )
+    return int(conn.execute("SELECT COUNT(*) FROM text_map").fetchone()[0])
+
+
+def rebuild_fts(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute("DELETE FROM talk_sentence_fts")
+        conn.execute(
+            """
+            INSERT INTO talk_sentence_fts(rowid, speaker, text)
+            SELECT talk_sentence_id, COALESCE(speaker_chs, ''), COALESCE(text_chs, '')
+            FROM talk_sentence
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        conn.execute("DELETE FROM mission_fts")
+        conn.execute(
+            """
+            INSERT INTO mission_fts(rowid, name, mission_type)
+            SELECT main_mission_id, COALESCE(name_chs, ''), COALESCE(mission_type, '')
+            FROM main_mission
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        conn.execute("DELETE FROM avatar_fts")
+        conn.execute(
+            """
+            INSERT INTO avatar_fts(rowid, name, full_name, damage_type, base_type)
+            SELECT avatar_id, COALESCE(name_chs, ''), COALESCE(full_name_chs, ''),
+                   COALESCE(damage_type, ''), COALESCE(avatar_base_type, '')
+            FROM avatar
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        conn.execute("DELETE FROM item_fts")
+        conn.execute(
+            """
+            INSERT INTO item_fts(rowid, name, description)
+            SELECT item_id, COALESCE(item_name_chs, ''), COALESCE(item_desc_chs, '')
+            FROM item
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
+
+
+def write_lite_meta(conn: sqlite3.Connection, source_db: Path, profile: Dict[str, Any]) -> None:
+    counts = table_counts(conn)
+    rows = [
+        ("table_counts", json.dumps(counts, ensure_ascii=False)),
+        ("lite_profile", json.dumps(profile, ensure_ascii=False)),
+        ("source_db", str(source_db.resolve())),
+    ]
+    conn.executemany(
+        """
+        INSERT INTO meta(key, value) VALUES(?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        rows,
+    )
+
+
+def build_full_db(resources_root: Path, db_path: Path, langs: List[str], include_level_config: bool) -> None:
     log(f"Resources: {resources_root}")
     log(f"Database: {db_path}")
+    log(f"Profile: full")
     log(f"Languages: {', '.join(langs)}")
     log(f"Include Config/Level: {include_level_config}")
 
@@ -1107,6 +1399,7 @@ def main() -> int:
             conn,
             {
                 "build_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "build_profile": "full",
                 "resources_root": str(resources_root),
                 "langs": langs,
                 "include_level_config": include_level_config,
@@ -1120,10 +1413,136 @@ def main() -> int:
         for k, v in counts.items():
             log(f"  {k}: {v:,}")
         log(f"Elapsed: {elapsed}s")
-        return 0
     finally:
         conn.close()
 
+
+def build_lite_db(
+    source_db: Path,
+    output_db: Path,
+    resources_root: Path,
+    langs: List[str],
+    keep_all_story_refs: bool,
+    keep_all_talk: bool,
+    include_monster_text: bool,
+    vacuum: bool,
+) -> None:
+    t0 = time.time()
+    if not source_db.exists():
+        raise FileNotFoundError(f"Source DB not found: {source_db}")
+
+    output_db.parent.mkdir(parents=True, exist_ok=True)
+    log(f"Source: {source_db} ({file_size_mb(source_db):.2f} MB)")
+    log(f"Output: {output_db}")
+    log(f"Profile: lite")
+    log(f"Langs: {','.join(langs)}")
+    log(f"Story refs: {'ALL' if keep_all_story_refs else 'MISSION_ONLY'}")
+    log(f"Talk rows: {'ALL' if keep_all_talk else 'REFERENCED_ONLY'}")
+
+    conn = sqlite3.connect(output_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        create_schema(conn)
+        conn.execute("ATTACH DATABASE ? AS src", (str(source_db.resolve()),))
+        conn.execute("PRAGMA foreign_keys = OFF")
+
+        copy_static_tables_from_source(conn)
+        copy_story_and_talk_from_source(conn, keep_all_story_refs=keep_all_story_refs, keep_all_talk=keep_all_talk)
+
+        add_hash_sql_sources(conn)
+        extra_hashes = gather_runtime_hashes(conn, resources_root=resources_root, include_monster=include_monster_text)
+        inserted_extra = insert_runtime_hashes(conn, extra_hashes)
+        log(f"Extra runtime hashes: {inserted_extra:,}")
+
+        text_count = copy_text_map_by_needed_hash(conn, langs)
+        log(f"text_map rows kept: {text_count:,}")
+
+        rebuild_fts(conn)
+
+        profile = {
+            "build_profile": "lite",
+            "langs": langs,
+            "keep_all_story_refs": keep_all_story_refs,
+            "keep_all_talk": keep_all_talk,
+            "include_monster_text": include_monster_text,
+            "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        write_lite_meta(conn, source_db=source_db, profile=profile)
+
+        conn.commit()
+        if vacuum:
+            log("VACUUM ...")
+            conn.execute("VACUUM")
+            conn.commit()
+    finally:
+        conn.close()
+
+    elapsed = time.time() - t0
+    src_mb = file_size_mb(source_db)
+    out_mb = file_size_mb(output_db)
+    shrink = (1.0 - out_mb / src_mb) * 100.0 if src_mb > 0 else 0.0
+    log(f"Done in {elapsed:.1f}s")
+    log(f"Lite DB size: {out_mb:.2f} MB (reduced {shrink:.1f}%)")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Build full or lite sqlite DB for querying resources.")
+    parser.add_argument("--profile", choices=("full", "lite"), default="full", help="Build profile mode.")
+    parser.add_argument("--resources-root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--db-path", type=Path, default=None, help="Output sqlite db path.")
+    parser.add_argument("--source-db", type=Path, default=None, help="Source DB for --profile lite.")
+    parser.add_argument("--langs", type=str, default=None, help="Comma-separated languages, e.g. CHS,EN,JP,KR")
+    parser.add_argument("--skip-level-config", action="store_true", help="(full) Only scan Story/ for references.")
+    parser.add_argument("--keep-all-story-refs", action="store_true", help="(lite) Keep all story_reference rows.")
+    parser.add_argument("--keep-all-talk", action="store_true", help="(lite) Keep all talk_sentence rows.")
+    parser.add_argument("--exclude-monster-text", action="store_true", help="(lite) Do not keep monster text hashes.")
+    parser.add_argument("--no-vacuum", action="store_true", help="(lite) Skip VACUUM step.")
+    parser.add_argument("--force", action="store_true", help="Overwrite existing db if present.")
+    args = parser.parse_args()
+
+    profile = args.profile.lower()
+    resources_root = args.resources_root.resolve()
+    db_dir = Path(__file__).resolve().parent / "database"
+    full_default_db = db_dir / "hsr_resources.db"
+    lite_default_db = db_dir / "hsr_resources_lite.db"
+    db_path = (args.db_path if args.db_path else (lite_default_db if profile == "lite" else full_default_db)).resolve()
+    default_langs = ["CHS", "EN", "JP", "KR"] if profile == "lite" else ["CHS", "EN"]
+    langs = parse_langs(args.langs, default_langs)
+
+    if not resources_root.exists():
+        raise FileNotFoundError(resources_root)
+
+    if db_path.exists():
+        if not args.force:
+            raise FileExistsError(f"{db_path} already exists. Use --force to overwrite.")
+        db_path.unlink()
+
+    if profile == "full":
+        build_full_db(
+            resources_root=resources_root,
+            db_path=db_path,
+            langs=langs,
+            include_level_config=not args.skip_level_config,
+        )
+        return 0
+
+    source_db = (args.source_db if args.source_db else full_default_db).resolve()
+    if source_db == db_path:
+        raise ValueError("For lite build, --source-db and --db-path cannot be the same file.")
+    if not source_db.exists():
+        raise FileNotFoundError(f"Source DB not found: {source_db}")
+
+    build_lite_db(
+        source_db=source_db,
+        output_db=db_path,
+        resources_root=resources_root,
+        langs=langs,
+        keep_all_story_refs=args.keep_all_story_refs,
+        keep_all_talk=args.keep_all_talk,
+        include_monster_text=not args.exclude_monster_text,
+        vacuum=not args.no_vacuum,
+    )
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())

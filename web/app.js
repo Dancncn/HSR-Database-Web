@@ -605,7 +605,7 @@ async function openTermPopover(term, anchorEl) {
   const requestId = ++termExplainState.requestId;
   try {
     const lang = currentDataLang();
-    const data = await api("/api/term/explain", { term: cleanTerm, lang, limit: 5 });
+    const data = await api("/api/term/explain", { term: cleanTerm, lang, limit: 5, module: state.currentPage });
     if (requestId !== termExplainState.requestId) return;
     const items = Array.isArray(data.items) ? data.items : [];
     if (!items.length) {

@@ -76,6 +76,7 @@ LANG_ALIAS = {
     "KO_KR": "KR",
 }
 SUPPORTED_LANGS = {"CHS", "EN", "JP", "KR"}
+SUPPORTED_MODULES = {"default", "avatar", "dialogue", "mission", "item", "monster"}
 
 try:
     import xxhash  # type: ignore[import-not-found]
@@ -304,13 +305,29 @@ def resolve_hash_texts(conn: sqlite3.Connection, lang: str, hashes: List[Optiona
     return {str(row["hash"]): row["text"] for row in rows}
 
 
+@functools.lru_cache(maxsize=8)
+def resolve_textmap_root(resources_root_str: str) -> Path:
+    base = Path(resources_root_str)
+    # Relative-path first layout:
+    # - if resources_root points to repo root => use hsrdb/Textmap
+    # - if resources_root points to hsrdb/    => use Textmap
+    if (base / "database").exists() and (base / "web").exists():
+        candidates = [base / "Textmap", base / "TextMap"]
+    else:
+        candidates = [base / "hsrdb" / "Textmap", base / "hsrdb" / "TextMap"]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
 def ensure_lang_loaded(conn: sqlite3.Connection, resources_root: Path, lang: str) -> bool:
     lang = normalize_lang(lang)
     exists = conn.execute("SELECT 1 FROM text_map WHERE lang = ? LIMIT 1", (lang,)).fetchone()
     if exists is not None:
         return True
 
-    text_root = resources_root / "TextMap"
+    text_root = resolve_textmap_root(str(resources_root.resolve()))
     merged: Dict[str, str] = {}
     for name in (f"TextMapMain{lang}.json", f"TextMap{lang}.json"):
         path = text_root / name
@@ -678,7 +695,11 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     @property
     def db_path(self) -> Path:
-        return self.server.db_path  # type: ignore[attr-defined]
+        return self.db_paths["default"]
+
+    @property
+    def db_paths(self) -> Dict[str, Path]:
+        return self.server.db_paths  # type: ignore[attr-defined]
 
     @property
     def web_root(self) -> Path:
@@ -688,10 +709,20 @@ class AppHandler(SimpleHTTPRequestHandler):
     def resources_root(self) -> Path:
         return self.server.resources_root  # type: ignore[attr-defined]
 
-    def _db(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+    def _db(self, module: str = "default") -> sqlite3.Connection:
+        mod = (module or "default").strip().lower()
+        path = self.db_paths.get(mod) or self.db_paths.get("default")
+        if path is None:
+            raise FileNotFoundError(f"No database path configured for module={module}")
+        conn = sqlite3.connect(path)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _module_name(self, raw: Optional[str], default: str = "default") -> str:
+        token = (raw or "").strip().lower()
+        if not token:
+            return default
+        return token if token in SUPPORTED_MODULES else default
 
     def _send_json(self, payload: Any, status: int = 200) -> None:
         body = json_bytes(payload)
@@ -801,7 +832,8 @@ class AppHandler(SimpleHTTPRequestHandler):
             self._send_json({"error": "server_error", "detail": str(exc)}, status=500)
 
     def _api_stats(self) -> Dict[str, Any]:
-        with self._db() as conn:
+        out: Dict[str, Any] = {}
+        with self._db("default") as conn:
             rows = conn.execute("SELECT key, value FROM meta WHERE key IN ('build_at', 'elapsed_seconds', 'table_counts')").fetchall()
             out = {row["key"]: row["value"] for row in rows}
             for key in ("elapsed_seconds", "table_counts"):
@@ -810,6 +842,29 @@ class AppHandler(SimpleHTTPRequestHandler):
                         out[key] = json.loads(out[key])
                     except Exception:
                         pass
+
+        def count_in(module: str, table: str) -> Optional[int]:
+            try:
+                with self._db(module) as conn:
+                    return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            except Exception:
+                return None
+
+        table_counts = out.get("table_counts")
+        if not isinstance(table_counts, dict):
+            table_counts = {}
+        mapping = {
+            "talk_sentence": ("dialogue", "talk_sentence"),
+            "story_reference": ("mission", "story_reference"),
+            "main_mission": ("mission", "main_mission"),
+            "avatar": ("avatar", "avatar"),
+            "item": ("item", "item"),
+        }
+        for key, (module, table) in mapping.items():
+            value = count_in(module, table)
+            if value is not None:
+                table_counts[key] = value
+        out["table_counts"] = table_counts
         try:
             out["monster_count"] = len((load_monster_index(str(self.resources_root.resolve())).get("items") or []))
         except Exception:
@@ -826,7 +881,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         speaker_col = "speaker_en" if lang == "EN" else "speaker_chs"
         text_col = "text_en" if lang == "EN" else "text_chs"
 
-        with self._db() as conn:
+        with self._db("dialogue") as conn:
             if lang in ("CHS", "EN"):
                 if not q:
                     total = conn.execute("SELECT COUNT(*) FROM talk_sentence").fetchone()[0]
@@ -942,7 +997,7 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def _api_dialogue_refs(self, talk_sentence_id: int, query: Dict[str, List[str]]) -> Dict[str, Any]:
         page, page_size, offset = paging(query, default_size=30, max_size=200)
-        with self._db() as conn:
+        with self._db("mission") as conn:
             total = conn.execute(
                 "SELECT COUNT(*) FROM story_reference WHERE talk_sentence_id = ?",
                 (talk_sentence_id,),
@@ -985,7 +1040,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             )
         """
 
-        with self._db() as conn:
+        with self._db("mission") as conn:
             if lang in ("CHS", "EN"):
                 if not q:
                     total = conn.execute(
@@ -1192,7 +1247,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         ref_limit = as_int(query.get("ref_limit", ["200"])[0], 200, 1, 1000)
         dialogue_limit = as_int(query.get("dialogue_limit", ["300"])[0], 300, 1, 3000)
 
-        with self._db() as conn:
+        with self._db("mission") as conn:
             if lang in ("CHS", "EN"):
                 mission = conn.execute(
                     f"SELECT main_mission_id, mission_type, world_id, chapter_id, mission_pack, display_priority, {name_col} AS name FROM main_mission WHERE main_mission_id = ?",
@@ -1243,77 +1298,106 @@ class AppHandler(SimpleHTTPRequestHandler):
 
             like_story = f"Story/Mission/{main_mission_id}/%"
             like_cfg = f"Config/Level/Mission/{main_mission_id}/%"
-            if lang in ("CHS", "EN"):
-                refs = conn.execute(
-                    """
-                    SELECT sr.source_path, sr.source_group, sr.json_path, sr.task_type, sr.timeline_name,
-                           sr.performance_type, sr.performance_id, sr.talk_sentence_id,
-                           ts.voice_id, ts.{speaker_col} AS speaker, ts.{text_col} AS text
-                    FROM story_reference sr
-                    LEFT JOIN talk_sentence ts ON ts.talk_sentence_id = sr.talk_sentence_id
-                    WHERE sr.source_path LIKE ? OR sr.source_path LIKE ?
-                    ORDER BY (sr.talk_sentence_id IS NULL), sr.talk_sentence_id, sr.source_path, sr.json_path
-                    LIMIT ?
-                    """.format(speaker_col=speaker_col, text_col=text_col),
-                    (like_story, like_cfg, ref_limit),
-                ).fetchall()
+            refs_base = conn.execute(
+                """
+                SELECT sr.source_path, sr.source_group, sr.json_path, sr.task_type, sr.timeline_name,
+                       sr.performance_type, sr.performance_id, sr.talk_sentence_id
+                FROM story_reference sr
+                WHERE sr.source_path LIKE ? OR sr.source_path LIKE ?
+                ORDER BY (sr.talk_sentence_id IS NULL), sr.talk_sentence_id, sr.source_path, sr.json_path
+                LIMIT ?
+                """,
+                (like_story, like_cfg, ref_limit),
+            ).fetchall()
 
-                dialogues = conn.execute(
-                    """
-                    SELECT ts.talk_sentence_id, ts.voice_id, ts.{speaker_col} AS speaker, ts.{text_col} AS text,
-                           MIN(sr.source_path) AS source_path, MIN(sr.json_path) AS json_path
-                    FROM story_reference sr
-                    JOIN talk_sentence ts ON ts.talk_sentence_id = sr.talk_sentence_id
-                    WHERE (sr.source_path LIKE ? OR sr.source_path LIKE ?)
-                      AND ts.{text_col} IS NOT NULL
-                      AND ts.{text_col} != ''
-                    GROUP BY ts.talk_sentence_id, ts.voice_id, ts.{speaker_col}, ts.{text_col}
-                    ORDER BY ts.talk_sentence_id ASC
-                    LIMIT ?
-                    """.format(speaker_col=speaker_col, text_col=text_col),
-                    (like_story, like_cfg, dialogue_limit),
-                ).fetchall()
+        talk_ids = sorted(
+            {
+                int(row["talk_sentence_id"])
+                for row in refs_base
+                if isinstance(row["talk_sentence_id"], int)
+            }
+        )
+        talk_map: Dict[int, Dict[str, Any]] = {}
+        if talk_ids:
+            placeholders = ",".join("?" for _ in talk_ids)
+            with self._db("dialogue") as conn:
+                if lang in ("CHS", "EN"):
+                    talk_rows = conn.execute(
+                        f"""
+                        SELECT talk_sentence_id, voice_id, {speaker_col} AS speaker, {text_col} AS text
+                        FROM talk_sentence
+                        WHERE talk_sentence_id IN ({placeholders})
+                        """,
+                        talk_ids,
+                    ).fetchall()
+                else:
+                    ensure_lang_loaded(conn, self.resources_root, lang)
+                    talk_rows = conn.execute(
+                        f"""
+                        SELECT t.talk_sentence_id, t.voice_id,
+                               COALESCE(sp.text, '') AS speaker,
+                               COALESCE(tx.text, '') AS text
+                        FROM talk_sentence t
+                        LEFT JOIN text_map sp ON sp.lang = ? AND sp.hash = t.speaker_hash
+                        LEFT JOIN text_map tx ON tx.lang = ? AND tx.hash = t.text_hash
+                        WHERE t.talk_sentence_id IN ({placeholders})
+                        """,
+                        (lang, lang, *talk_ids),
+                    ).fetchall()
+            for row in talk_rows:
+                tid = int(row["talk_sentence_id"])
+                talk_map[tid] = {
+                    "voice_id": row["voice_id"],
+                    "speaker": row["speaker"] or "",
+                    "text": row["text"] or "",
+                }
+
+        refs: List[Dict[str, Any]] = []
+        first_source_by_talk: Dict[int, Tuple[str, str]] = {}
+        for row in refs_base:
+            item = dict(row)
+            tid = item.get("talk_sentence_id")
+            if isinstance(tid, int) and tid in talk_map:
+                talk = talk_map[tid]
+                item["voice_id"] = talk.get("voice_id")
+                item["speaker"] = talk.get("speaker") or ""
+                item["text"] = talk.get("text") or ""
+                if tid not in first_source_by_talk:
+                    first_source_by_talk[tid] = (item.get("source_path") or "", item.get("json_path") or "")
             else:
-                refs = conn.execute(
-                    """
-                    SELECT sr.source_path, sr.source_group, sr.json_path, sr.task_type, sr.timeline_name,
-                           sr.performance_type, sr.performance_id, sr.talk_sentence_id,
-                           ts.voice_id, COALESCE(sp.text, '') AS speaker, COALESCE(tx.text, '') AS text
-                    FROM story_reference sr
-                    LEFT JOIN talk_sentence ts ON ts.talk_sentence_id = sr.talk_sentence_id
-                    LEFT JOIN text_map sp ON sp.lang = ? AND sp.hash = ts.speaker_hash
-                    LEFT JOIN text_map tx ON tx.lang = ? AND tx.hash = ts.text_hash
-                    WHERE sr.source_path LIKE ? OR sr.source_path LIKE ?
-                    ORDER BY (sr.talk_sentence_id IS NULL), sr.talk_sentence_id, sr.source_path, sr.json_path
-                    LIMIT ?
-                    """,
-                    (lang, lang, like_story, like_cfg, ref_limit),
-                ).fetchall()
+                item["voice_id"] = None
+                item["speaker"] = ""
+                item["text"] = ""
+            refs.append(item)
 
-                dialogues = conn.execute(
-                    """
-                    SELECT ts.talk_sentence_id, ts.voice_id, COALESCE(sp.text, '') AS speaker, COALESCE(tx.text, '') AS text,
-                           MIN(sr.source_path) AS source_path, MIN(sr.json_path) AS json_path
-                    FROM story_reference sr
-                    JOIN talk_sentence ts ON ts.talk_sentence_id = sr.talk_sentence_id
-                    LEFT JOIN text_map sp ON sp.lang = ? AND sp.hash = ts.speaker_hash
-                    LEFT JOIN text_map tx ON tx.lang = ? AND tx.hash = ts.text_hash
-                    WHERE (sr.source_path LIKE ? OR sr.source_path LIKE ?)
-                      AND tx.text IS NOT NULL
-                      AND tx.text != ''
-                    GROUP BY ts.talk_sentence_id, ts.voice_id, sp.text, tx.text
-                    ORDER BY ts.talk_sentence_id ASC
-                    LIMIT ?
-                    """,
-                    (lang, lang, like_story, like_cfg, dialogue_limit),
-                ).fetchall()
+        dialogues: List[Dict[str, Any]] = []
+        for tid in sorted(first_source_by_talk.keys()):
+            talk = talk_map.get(tid)
+            if not talk:
+                continue
+            text = str(talk.get("text") or "").strip()
+            if not text:
+                continue
+            source_path, json_path = first_source_by_talk[tid]
+            dialogues.append(
+                {
+                    "talk_sentence_id": tid,
+                    "voice_id": talk.get("voice_id"),
+                    "speaker": talk.get("speaker") or "",
+                    "text": text,
+                    "source_path": source_path,
+                    "json_path": json_path,
+                }
+            )
+            if len(dialogues) >= dialogue_limit:
+                break
 
         return {
             "main_mission": dict(mission),
             "sub_missions": [dict(row) for row in subs],
             "mission_packs": [row["mission_pack"] for row in pack_links],
-            "story_refs": [dict(row) for row in refs],
-            "dialogues": [dict(row) for row in dialogues],
+            "story_refs": refs,
+            "dialogues": dialogues,
         }
 
     def _api_search_avatar(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
@@ -1323,7 +1407,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         name_col = "name_en" if lang == "EN" else "name_chs"
         full_col = "full_name_en" if lang == "EN" else "full_name_chs"
 
-        with self._db() as conn:
+        with self._db("avatar") as conn:
             if lang in ("CHS", "EN"):
                 if not q:
                     total = conn.execute("SELECT COUNT(*) FROM avatar").fetchone()[0]
@@ -1438,7 +1522,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         skill_level_limit = as_int(qv(query, "skill_level_limit", "10"), 10, 1, 20)
         level_max = as_int(qv(query, "level_max", "80"), 80, 1, 80)
 
-        with self._db() as conn:
+        with self._db("item") as conn:
             if lang not in ("CHS", "EN"):
                 ensure_lang_loaded(conn, self.resources_root, lang)
             avatar = conn.execute(
@@ -1682,7 +1766,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         if where_parts:
             where_sql = "WHERE " + " AND ".join(where_parts)
 
-        with self._db() as conn:
+        with self._db("item") as conn:
             if lang in ("CHS", "EN"):
                 if q:
                     rows = []
@@ -1833,7 +1917,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         bg_desc_col = "item_bg_desc_en" if lang == "EN" else "item_bg_desc_chs"
         purpose_col = "purpose_text_en" if lang == "EN" else "purpose_text_chs"
 
-        with self._db() as conn:
+        with self._db("item") as conn:
             if lang in ("CHS", "EN"):
                 row = conn.execute(
                     f"""
@@ -1873,7 +1957,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             return {"item": item, "light_cone": light_cone}
 
     def _api_item_facets(self) -> Dict[str, Any]:
-        with self._db() as conn:
+        with self._db("monster") as conn:
             rarity = [
                 row["rarity"]
                 for row in conn.execute(
@@ -1915,7 +1999,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         idx = load_monster_index(str(self.resources_root.resolve()))
         all_items = idx.get("items", [])
 
-        with self._db() as conn:
+        with self._db("monster") as conn:
             ensure_lang_loaded(conn, self.resources_root, lang)
             ensure_lang_loaded(conn, self.resources_root, "CHS")
             ensure_lang_loaded(conn, self.resources_root, "EN")
@@ -1991,7 +2075,7 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         skills_by_id: Dict[int, Dict[str, Any]] = idx.get("skills") or {}
 
-        with self._db() as conn:
+        with self._db("monster") as conn:
             ensure_lang_loaded(conn, self.resources_root, lang)
             ensure_lang_loaded(conn, self.resources_root, "CHS")
             ensure_lang_loaded(conn, self.resources_root, "EN")
@@ -2189,7 +2273,8 @@ class AppHandler(SimpleHTTPRequestHandler):
             scored.sort(key=lambda x: (-float(x["score"]), len(str(x["text"]))))
             return scored[:limit]
 
-        with self._db() as conn:
+        module_name = self._module_name(qv(query, "module", ""), "default")
+        with self._db(module_name) as conn:
             primary = search_in_lang(conn, lang)
             used_lang = lang
             if not primary and lang != "CHS":
@@ -2213,7 +2298,8 @@ class AppHandler(SimpleHTTPRequestHandler):
             return with_paging_meta({"q": q, "lang": lang, "items": []}, page, page_size, 0)
 
         like = f"%{q}%"
-        with self._db() as conn:
+        module_name = self._module_name(qv(query, "module", ""), "default")
+        with self._db(module_name) as conn:
             ensure_lang_loaded(conn, self.resources_root, lang)
             total = conn.execute(
                 "SELECT COUNT(*) FROM text_map WHERE lang = ? AND text LIKE ?",
@@ -2227,7 +2313,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         return with_paging_meta(payload, page, page_size, total)
 
 
-def run(host: str, port: int, db_path: Path, web_root: Path, resources_root: Path) -> None:
+def run(host: str, port: int, db_path: Path, web_root: Path, resources_root: Path, db_module_paths: Optional[Dict[str, Path]] = None) -> None:
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}")
     if not web_root.exists():
@@ -2235,25 +2321,61 @@ def run(host: str, port: int, db_path: Path, web_root: Path, resources_root: Pat
     if not resources_root.exists():
         raise FileNotFoundError(f"Resources root not found: {resources_root}")
 
+    db_paths: Dict[str, Path] = {"default": db_path}
+    for key, path in (db_module_paths or {}).items():
+        if key not in SUPPORTED_MODULES or key == "default":
+            continue
+        if not path.exists():
+            raise FileNotFoundError(f"Database not found for module {key}: {path}")
+        db_paths[key] = path
+
     httpd = ThreadingHTTPServer((host, port), AppHandler)
-    httpd.db_path = db_path  # type: ignore[attr-defined]
+    httpd.db_paths = db_paths  # type: ignore[attr-defined]
     httpd.web_root = web_root  # type: ignore[attr-defined]
     httpd.resources_root = resources_root  # type: ignore[attr-defined]
     print(f"Serving on http://{host}:{port}")
-    print(f"DB: {db_path}")
+    print(f"DB(default): {db_path}")
+    for mod in ("avatar", "dialogue", "mission", "item", "monster"):
+        if mod in db_paths:
+            print(f"DB({mod}): {db_paths[mod]}")
     httpd.serve_forever()
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Serve database query API and frontend.")
-    parser.add_argument("--db-path", type=Path, default=Path(__file__).resolve().parent / "hsr_resources.db")
+    default_db_dir = Path(__file__).resolve().parent / "database"
+    parser.add_argument("--db-path", type=Path, default=default_db_dir / "hsr_resources.db")
+    parser.add_argument("--db-avatar", type=Path, default=None, help="Optional avatar module database path.")
+    parser.add_argument("--db-dialogue", type=Path, default=None, help="Optional dialogue module database path.")
+    parser.add_argument("--db-mission", type=Path, default=None, help="Optional mission module database path.")
+    parser.add_argument("--db-item", type=Path, default=None, help="Optional item module database path.")
+    parser.add_argument("--db-monster", type=Path, default=None, help="Optional monster/text module database path.")
     parser.add_argument("--web-root", type=Path, default=Path(__file__).resolve().parent / "web")
     parser.add_argument("--resources-root", type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     args = parser.parse_args()
 
-    run(args.host, args.port, args.db_path.resolve(), args.web_root.resolve(), args.resources_root.resolve())
+    module_paths: Dict[str, Path] = {}
+    if args.db_avatar:
+        module_paths["avatar"] = args.db_avatar.resolve()
+    if args.db_dialogue:
+        module_paths["dialogue"] = args.db_dialogue.resolve()
+    if args.db_mission:
+        module_paths["mission"] = args.db_mission.resolve()
+    if args.db_item:
+        module_paths["item"] = args.db_item.resolve()
+    if args.db_monster:
+        module_paths["monster"] = args.db_monster.resolve()
+
+    run(
+        args.host,
+        args.port,
+        args.db_path.resolve(),
+        args.web_root.resolve(),
+        args.resources_root.resolve(),
+        db_module_paths=module_paths,
+    )
     return 0
 
 
