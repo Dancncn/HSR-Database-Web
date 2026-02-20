@@ -39,7 +39,27 @@ API 功能概览：
 
 ---
 
+## 克隆项目
+
+```cmd
+git clone <your-repo-url>
+cd HSR-Database-Web
+```
+
+示例输出：
+
+```text
+Cloning into 'HSR-Database-Web'...
+```
+
+---
+
 # 二、从零开始部署（核心流程）
+
+目录约定（后续命令默认按此切换）：
+
+- 项目根目录：`HSR-Database-Web`
+- Worker 目录：`HSR-Database-Web\cf_worker`
 
 ## Step 1: 安装环境（Node、wrangler、登录）
 
@@ -48,33 +68,42 @@ npm install -g wrangler
 wrangler login
 ```
 
-前置条件：
+示例输出：
 
-- Node.js
-- npm
-- Cloudflare 账号
+```text
+Successfully installed wrangler
+Successfully logged in.
+```
 
 ## Step 2: 构建本地数据库（build_db.py 等）
 
-在仓库根目录执行：
+在项目根目录执行：
 
 ```cmd
-cd /d E:\PROJECT2\HSR-Database-Web
+cd HSR-Database-Web
 python build_db.py
 python build_module_dbs.py
 ```
 
-说明：
+示例输出：
 
-- 会生成本地 `*.db` / `*.sqlite3` 数据库文件。
-- 目的：把原始资源整合为可查询的关系型结构。
+```text
+Build completed
+Output database written to database\...
+```
 
 ## Step 3: 导出 dump_all.sql
 
-推荐方式（已安装 sqlite3 CLI）：
+在项目根目录执行（已安装 sqlite3 CLI）：
 
 ```cmd
 sqlite3 <your_db_file>.sqlite3 ".dump" > dump_all.sql
+```
+
+示例输出：
+
+```text
+(无报错即成功，生成 dump_all.sql)
 ```
 
 说明：
@@ -86,10 +115,17 @@ sqlite3 <your_db_file>.sqlite3 ".dump" > dump_all.sql
 
 ## Step 4: 生成 dump_all_d1.sql（说明精简原因）
 
-使用仓库脚本：
+在项目根目录执行：
 
 ```cmd
 python scripts\export_sqlite_dump.py
+```
+
+示例输出：
+
+```text
+Dump exported: ...\dump_all.sql
+D1-compatible dump exported: ...\dump_all_d1.sql
 ```
 
 说明：
@@ -99,19 +135,24 @@ python scripts\export_sqlite_dump.py
 
 ## Step 5: 创建 D1 数据库
 
+在 `cf_worker` 目录执行：
+
 ```cmd
-wrangler d1 create hsrdb
-wrangler d1 list
+cd cf_worker
+wrangler --config wrangler.jsonc d1 create hsrdb
+wrangler --config wrangler.jsonc d1 list
 ```
 
-从输出中记录：
+示例输出：
 
-- `database_name`
-- `database_id`
+```text
+✅ Successfully created DB 'hsrdb'
+database_id: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
 
 ## Step 6: 修改 wrangler.jsonc（必须修改 name / database_id）
 
-编辑 `cf_worker/wrangler.jsonc`，至少确认以下字段：
+编辑 `cf_worker\wrangler.jsonc`，至少确认以下字段：
 
 - `name`：替换为你的 Worker 名称
 - `main`：应为 `src/entry.py`
@@ -119,18 +160,32 @@ wrangler d1 list
 - `d1_databases[0].database_name`：你的 D1 名称
 - `d1_databases[0].database_id`：替换为你自己的 ID
 
-可用配置检查命令：
+可用检查命令：
 
 ```cmd
-cd /d E:\PROJECT2\HSR-Database-Web\cf_worker
 wrangler --config wrangler.jsonc d1 list
+```
+
+示例输出：
+
+```text
+name: hsrdb
+id: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
 ## Step 7: 导入 dump_all_d1.sql
 
+回到项目根目录执行：
+
 ```cmd
-cd /d E:\PROJECT2\HSR-Database-Web
+cd ..
 wrangler --config cf_worker\wrangler.jsonc d1 execute hsrdb --remote --file=.\dump_all_d1.sql
+```
+
+示例输出：
+
+```text
+✅ Executed SQL file successfully
 ```
 
 如文件很大可拆分执行：
@@ -143,23 +198,44 @@ wrangler d1 execute hsrdb --remote --file dump_data_part2.sql
 
 ## Step 8: 本地开发测试
 
+在 `cf_worker` 目录启动：
+
 ```cmd
-cd /d E:\PROJECT2\HSR-Database-Web\cf_worker
+cd cf_worker
 wrangler --config wrangler.jsonc dev --ip 127.0.0.1 --port 8787
 ```
 
-另开 CMD 验证：
+示例输出：
+
+```text
+Ready on http://127.0.0.1:8787
+```
+
+另开 CMD（仍在 `cf_worker` 目录）验证：
 
 ```cmd
 curl -i http://127.0.0.1:8787/__health
 curl -i http://127.0.0.1:8787/api/stats
 ```
 
+示例输出：
+
+```text
+HTTP/1.1 200 OK
+```
+
 ## Step 9: wrangler deploy 部署
 
+在 `cf_worker` 目录执行：
+
 ```cmd
-cd /d E:\PROJECT2\HSR-Database-Web\cf_worker
 wrangler --config wrangler.jsonc deploy
+```
+
+示例输出：
+
+```text
+✅ Deployed hsrdb-api
 ```
 
 查看日志：
@@ -170,6 +246,8 @@ wrangler --config wrangler.jsonc tail --format pretty
 
 ## Step 10: 使用 curl 验证接口
 
+在线验证（替换为你的域名）：
+
 ```cmd
 curl -i https://<worker>.<subdomain>.workers.dev/__health
 curl -i https://<worker>.<subdomain>.workers.dev/api/stats
@@ -177,11 +255,25 @@ curl -i "https://<worker>.<subdomain>.workers.dev/api/search/dialogue?q=test&lan
 curl -i "https://<worker>.<subdomain>.workers.dev/api/avatar/1001?lang=CHS"
 ```
 
-导入结果核验：
+示例输出：
+
+```text
+HTTP/1.1 200 OK
+```
+
+导入结果核验（在 `cf_worker` 目录）：
 
 ```cmd
-wrangler d1 execute hsrdb --remote --command="SELECT COUNT(*) AS tables FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"
-wrangler d1 execute hsrdb --remote --command="SELECT type, COUNT(*) AS cnt FROM sqlite_master GROUP BY type ORDER BY cnt DESC;"
+wrangler --config wrangler.jsonc d1 execute hsrdb --remote --command="SELECT COUNT(*) AS tables FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"
+wrangler --config wrangler.jsonc d1 execute hsrdb --remote --command="SELECT type, COUNT(*) AS cnt FROM sqlite_master GROUP BY type ORDER BY cnt DESC;"
+```
+
+示例输出：
+
+```text
+tables: 66
+table: 67
+index: 65
 ```
 
 ---
