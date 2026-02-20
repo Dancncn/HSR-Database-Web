@@ -9,3 +9,4 @@ _dump_*.sql
 __pycache__/
 *.pyc
 
+.wrangler/

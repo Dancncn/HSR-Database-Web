@@ -1,22 +1,23 @@
-﻿# HSR Database API - Cloudflare 部署说明
+﻿# 一、项目简介与架构
 
----
+本项目将 HSR 数据查询服务部署为 Cloudflare Worker API，数据库使用 Cloudflare D1。
 
-## 一、当前项目状态说明
+- 运行形态：`Client -> Worker -> D1`
+- 接口类型：REST 风格 `GET /api/*`
+- 调试接口：`/__health`、`/__debug`
+- 访问地址格式：`https://<worker-name>.<subdomain>.workers.dev`
 
-- 当前项目已成功部署为 Cloudflare Worker API。
-- 使用 Cloudflare D1 作为数据库。
-- API 已对公网开放。
-- 已验证所有核心接口 200 OK。
-- Pages 前端尚未部署（API 独立可用）。
-- 本地 D1 不完整会导致 500，这是开发阶段常见问题。
-- 某些网络可能无法访问 `*.workers.dev`（需更换网络或使用自定义域名）。
+架构图：
 
-当前 API 访问地址格式示例：
+```text
+Client
+  ↓
+Cloudflare Worker
+  ↓
+D1 Database
+```
 
-`https://<worker-name>.<subdomain>.workers.dev`
-
-当前主要 API 路由：
+API 功能概览：
 
 - `GET /api/stats`
 - `GET /api/search/dialogue`
@@ -38,190 +39,224 @@
 
 ---
 
-## 二、项目架构说明
+# 二、从零开始部署（核心流程）
 
-```text
-Client
-  ↓
-Cloudflare Worker
-  ↓
-D1 Database
+## Step 1: 安装环境（Node、wrangler、登录）
+
+```cmd
+npm install -g wrangler
+wrangler login
 ```
 
-- Worker 负责路由与查询。
-- D1 存储结构化数据。
-- 无服务器架构。
-- 全球 CDN 分发。
-- 自动扩展。
-
----
-
-## 三、如何从零部署到 Cloudflare
-
-### 1. 前置条件
+前置条件：
 
 - Node.js
 - npm
 - Cloudflare 账号
-- 已安装 wrangler
 
-安装命令示例：
+## Step 2: 构建本地数据库（build_db.py 等）
 
-```bash
-npm install -g wrangler
+在仓库根目录执行：
+
+```cmd
+cd /d E:\PROJECT2\HSR-Database-Web
+python build_db.py
+python build_module_dbs.py
 ```
 
-登录：
+说明：
 
-```bash
-wrangler login
+- 会生成本地 `*.db` / `*.sqlite3` 数据库文件。
+- 目的：把原始资源整合为可查询的关系型结构。
+
+## Step 3: 导出 dump_all.sql
+
+推荐方式（已安装 sqlite3 CLI）：
+
+```cmd
+sqlite3 <your_db_file>.sqlite3 ".dump" > dump_all.sql
 ```
 
----
+说明：
 
-### 2. 创建 D1 数据库
+- `dump_all.sql` 用于可重复导入 D1。
+- 避免提交二进制数据库文件。
+- 便于审计和环境迁移。
+- 如未安装 sqlite3 CLI，请先安装后执行。
 
-示例命令：
+## Step 4: 生成 dump_all_d1.sql（说明精简原因）
 
-```bash
+使用仓库脚本：
+
+```cmd
+python scripts\export_sqlite_dump.py
+```
+
+说明：
+
+- 脚本会输出 `dump_all.sql` 与 D1 兼容版 `dump_all_d1.sql`。
+- `dump_all_d1.sql` 会做 D1 兼容处理与结构裁剪（去除不兼容/中间构建对象）。
+
+## Step 5: 创建 D1 数据库
+
+```cmd
 wrangler d1 create hsrdb
+wrangler d1 list
 ```
 
-在 wrangler 配置中添加：
+从输出中记录：
 
-```toml
-[[d1_databases]]
-binding = "DB"
-database_name = "hsrdb"
-database_id = "<your-database-id>"
+- `database_name`
+- `database_id`
+
+## Step 6: 修改 wrangler.jsonc（必须修改 name / database_id）
+
+编辑 `cf_worker/wrangler.jsonc`，至少确认以下字段：
+
+- `name`：替换为你的 Worker 名称
+- `main`：应为 `src/entry.py`
+- `d1_databases[0].binding`：必须与代码 `env.DB` 一致（`DB`）
+- `d1_databases[0].database_name`：你的 D1 名称
+- `d1_databases[0].database_id`：替换为你自己的 ID
+
+可用配置检查命令：
+
+```cmd
+cd /d E:\PROJECT2\HSR-Database-Web\cf_worker
+wrangler --config wrangler.jsonc d1 list
 ```
 
----
+## Step 7: 导入 dump_all_d1.sql
 
-### 3. 导入数据库结构与数据
-
-```bash
-wrangler d1 execute hsrdb --file schema.sql
-wrangler d1 execute hsrdb --file seed.sql
+```cmd
+cd /d E:\PROJECT2\HSR-Database-Web
+wrangler --config cf_worker\wrangler.jsonc d1 execute hsrdb --remote --file=.\dump_all_d1.sql
 ```
 
----
+如文件很大可拆分执行：
 
-### 4. 本地开发验证
-
-```bash
-wrangler dev
-```
-
-验证接口：
-
-```bash
-curl http://127.0.0.1:8787/__health
-```
-
-说明：
-
-- 本地 D1 不完整会导致 500。
-- 可以使用远程 D1 进行开发。
-
----
-
-### 5. 部署上线
-
-```bash
-wrangler deploy
-```
-
-说明：
-
-- 发布成功后即可通过 workers.dev 访问。
-- 可通过 `wrangler tail` 查看实时日志。
-
----
-
-### 6. 常见问题
-
-- workers.dev 无法访问（网络屏蔽问题）。
-- `wrangler dev --remote` 连接超时。
-- 本地 D1 与线上 D1 不一致导致 500。
-- SQL 语法错误导致 `SQLITE_ERROR`。
-- `204` 响应必须使用 `Response(null, { status: 204 })`。
-
----
-
-## 四、当前可对外提供的能力
-
-- 当前 API 已可对外接入。
-- 支持跨域（CORS）。
-- 可用于前端网站查询。
-- 可被第三方程序调用。
-- 后续可增加 API Key 或 Rate Limit。
-
----
-
-## 五、后续计划
-
-- 部署 Cloudflare Pages 前端。
-- 绑定自定义域名。
-- 添加访问控制。
-- 优化查询性能。
-- 增加缓存策略。
-
----
-## 六、数据库文件如何上传到 Cloudflare D1
-
-### 1. 为什么不应把 dump_all.sql 等大文件提交到 GitHub
-
-- GitHub 对单文件有 100MB 限制，超限文件无法正常推送。
-- 数据库 dump 文件属于部署产物，不是源码本身。
-- 这类产物不应纳入源码管理，应通过部署流程导入目标环境。
-
-### 2. 正确上传方式
-
-#### 方式一：使用 wrangler 执行 SQL 文件
-
-```bash
-wrangler d1 execute hsrdb --remote --file dump_all.sql
-```
-
-说明：
-
-- `--remote` 表示执行到线上数据库。
-- 如果是本地开发环境可去掉 `--remote`。
-- 大文件执行时间可能较长，需等待命令完成。
-
-### 3. SQL 文件过大时的处理方式
-
-建议拆分为多个文件：
-
-- `dump_schema.sql`
-- `dump_data_part1.sql`
-- `dump_data_part2.sql`
-
-分别执行：
-
-```bash
+```cmd
 wrangler d1 execute hsrdb --remote --file dump_schema.sql
 wrangler d1 execute hsrdb --remote --file dump_data_part1.sql
 wrangler d1 execute hsrdb --remote --file dump_data_part2.sql
 ```
 
-### 4. 验证数据是否成功导入
+## Step 8: 本地开发测试
 
-```bash
-wrangler d1 execute hsrdb --remote --command="SELECT COUNT(*) FROM sqlite_master;"
+```cmd
+cd /d E:\PROJECT2\HSR-Database-Web\cf_worker
+wrangler --config wrangler.jsonc dev --ip 127.0.0.1 --port 8787
 ```
 
-或：
+另开 CMD 验证：
 
-```bash
-wrangler d1 execute hsrdb --remote --command="SELECT COUNT(*) FROM <table_name>;"
+```cmd
+curl -i http://127.0.0.1:8787/__health
+curl -i http://127.0.0.1:8787/api/stats
 ```
 
-### 5. 当前项目采用的实际方式
+## Step 9: wrangler deploy 部署
 
-- 本项目数据库通过 `dump_all.sql` 文件导入。
-- 未将 dump 文件提交到 GitHub。
-- 数据已成功写入 Cloudflare D1。
+```cmd
+cd /d E:\PROJECT2\HSR-Database-Web\cf_worker
+wrangler --config wrangler.jsonc deploy
+```
+
+查看日志：
+
+```cmd
+wrangler --config wrangler.jsonc tail --format pretty
+```
+
+## Step 10: 使用 curl 验证接口
+
+```cmd
+curl -i https://<worker>.<subdomain>.workers.dev/__health
+curl -i https://<worker>.<subdomain>.workers.dev/api/stats
+curl -i "https://<worker>.<subdomain>.workers.dev/api/search/dialogue?q=test&lang=CHS&page=1&page_size=5"
+curl -i "https://<worker>.<subdomain>.workers.dev/api/avatar/1001?lang=CHS"
+```
+
+导入结果核验：
+
+```cmd
+wrangler d1 execute hsrdb --remote --command="SELECT COUNT(*) AS tables FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"
+wrangler d1 execute hsrdb --remote --command="SELECT type, COUNT(*) AS cnt FROM sqlite_master GROUP BY type ORDER BY cnt DESC;"
+```
+
+---
+
+# 三、本地全量数据库 vs 线上精简数据库说明
+
+- 本地全量数据库规模：约 165 张表。
+- 线上 D1 实际业务结构：约 66 张业务表（统计时排除 `sqlite_%`）。
+- 差异原因：上线前会移除构建中间表、冗余表、临时表、非 API 必需表，并保留可服务接口的最终查询表与索引。
+- 结论：精简版并非数据缺失，而是结构裁剪与部署适配。
+
+已测线上统计结果：
+
+- `SELECT COUNT(*) AS tables FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';` -> `66`
+- `SELECT type, COUNT(*) AS cnt FROM sqlite_master GROUP BY type ORDER BY cnt DESC;` -> `table 67, index 65`
+
+---
+
+# 四、常见问题与排障
+
+## 1) workers.dev 无法访问
+
+- 可能是网络屏蔽导致。
+- 处理：更换网络或绑定自定义域名。
+
+## 2) wrangler dev --remote 超时
+
+- 常见于网络质量或 Cloudflare API 连接不稳定。
+- 处理：重试、切换网络、临时使用本地模式调试。
+
+## 3) 本地 D1 与线上 D1 不一致导致 500
+
+- 本地数据不完整或表结构未同步会导致接口报错。
+- 处理：优先以 `dump_all_d1.sql` 重新导入远程 D1，再联调。
+
+## 4) SQL 语法或对象错误（SQLITE_ERROR）
+
+- 常见原因：导入了未适配 D1 的 SQL（事务、触发器、FTS、不兼容语句等）。
+- 处理：使用仓库脚本生成的 D1 兼容 dump，并重新导入。
+
+## 5) 204 响应写法
+
+- 对于 OPTIONS 预检等场景，需使用：
+
+```python
+Response(null, { status: 204 })
+```
+
+## 6) wrangler-account.json 是否需要手动改
+
+- 不需要，也不建议手动编辑。
+- 它是 Wrangler/Pages 本地缓存与账户文件，不应提交到 Git。
+- 正确做法：`wrangler login`（CI 中使用 API Token）。
+- 排障时可删除该缓存文件让 Wrangler 重新生成。
+
+## 7) 为什么 dump_all.sql 不应提交 GitHub
+
+- GitHub 单文件有 100MB 限制。
+- dump/db 文件属于部署产物，不属于源码。
+- 正确做法：通过导入命令注入 D1，不把大产物入库。
+
+---
+
+# 五、当前线上部署状态（附录）
+
+- 当前项目已成功部署为 Cloudflare Worker API。
+- 使用 Cloudflare D1 作为数据库。
+- API 已对公网开放。
+- 已验证所有核心接口 200 OK。
+- Pages 前端尚未部署（API 独立可用）。
+- 本地 D1 不完整会导致 500，这是开发阶段常见问题。
+- 某些网络可能无法访问 `*.workers.dev`（需更换网络或使用自定义域名）。
+
+当前地址格式示例：
+
+`https://<worker-name>.<subdomain>.workers.dev`
 
 ---
