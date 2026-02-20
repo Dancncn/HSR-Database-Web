@@ -34,10 +34,11 @@ Open:
 
 Frontend now uses 4 paged groups:
 
-- `角色信息`
-- `对话文本搜索`
-- `主线任务搜索`
-- `物品搜索`
+- `Character Information`
+- `Dialogue Text Search`
+- `Main Quest Search`
+- `Item Search`
+- `Monster Search`
 
 ## API quick list
 
@@ -52,3 +53,9 @@ Frontend now uses 4 paged groups:
 - `GET /api/item/<ItemID>?lang=CHS`
 - `GET /api/item/facets`
 - `GET /api/search/text?q=...&lang=CHS&page=1&page_size=20`
+
+## Notes
+- You need download the Resources from 
+- [Dim](https://github.com/DimbreathBot/TurnBasedGameData) or 
+- [Mirror](https://gitlab.com/Dimbreath/turnbasedgamedata) to run this script.
+Thank for all contributions and support to this project.
